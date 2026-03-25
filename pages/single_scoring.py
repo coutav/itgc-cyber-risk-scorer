@@ -205,6 +205,7 @@ def render():
             help="Full risk text from the audit finding.",
             key="risk_area"
         )
+        ask_ai_btn = st.button("🤖 Ask AI", key="ask_ai_btn")
 
     with col_right:
         st.markdown('<div class="section-header">Finding Metadata</div>', unsafe_allow_html=True)
