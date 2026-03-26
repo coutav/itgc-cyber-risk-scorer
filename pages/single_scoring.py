@@ -267,152 +267,227 @@ def _stream_ai_response(client, messages: list, system_prompt: str):
             yield text
 
 
-def _render_ask_ai(result: dict, metadata: dict):
-    """Render the Ask AI chat panel after scoring results."""
-    st.markdown("---")
+@st.dialog("AI Risk Analyst", width="large")
+def _ai_dialog(result: dict, metadata: dict):
+    """Perplexity-style modal chat window for AI score explanation."""
 
-    # Inject chat-specific styles
+    # ── Dialog styles ──────────────────────────────────────────────────────
     st.markdown("""
     <style>
-    .ask-ai-cta {
-        text-align: center;
-        padding: 1.8rem 0 0.5rem;
+    /* Scrollable message area */
+    .ai-messages-wrap {
+        max-height: 52vh;
+        overflow-y: auto;
+        padding-right: 0.3rem;
+        margin-bottom: 0.8rem;
     }
-    .ask-ai-cta-label {
-        font-size: 0.82rem;
-        color: #4a5568;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
-        margin-bottom: 0.9rem;
-    }
-    .ai-chat-container {
-        background: #080d18;
+    /* Assistant bubble */
+    .ai-bubble-assistant {
+        background: #111827;
         border: 1px solid #1e2d45;
-        border-radius: 16px;
-        padding: 1.5rem 1.8rem 0.5rem;
-        margin-top: 0.4rem;
+        border-radius: 14px 14px 14px 4px;
+        padding: 1.1rem 1.4rem;
+        margin-bottom: 1rem;
+        font-size: 0.93rem;
+        line-height: 1.75;
+        color: #e2e8f0;
     }
-    .ai-chat-heading {
+    .ai-bubble-assistant h3 {
+        font-size: 0.82rem !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.07em !important;
+        text-transform: uppercase !important;
+        color: #4a5568 !important;
+        margin: 1rem 0 0.4rem !important;
+    }
+    .ai-bubble-assistant h3:first-child { margin-top: 0 !important; }
+    /* User bubble */
+    .ai-bubble-user {
+        background: rgba(99,102,241,0.08);
+        border: 1px solid rgba(99,102,241,0.2);
+        border-radius: 14px 14px 4px 14px;
+        padding: 0.7rem 1.1rem;
+        margin: 0.5rem 0 1rem 3rem;
+        font-size: 0.9rem;
+        color: #a5b4fc;
+        line-height: 1.6;
+    }
+    /* Header strip */
+    .ai-dialog-header {
         display: flex;
         align-items: center;
         justify-content: space-between;
+        padding-bottom: 0.75rem;
         margin-bottom: 1rem;
-        border-bottom: 1px solid #1a2236;
-        padding-bottom: 0.8rem;
+        border-bottom: 1px solid #1e2d45;
     }
-    .ai-chat-title {
-        font-size: 0.95rem;
+    .ai-dialog-title {
+        font-size: 1rem;
         font-weight: 700;
-        color: #a5b4fc;
-        letter-spacing: 0.04em;
+        color: #f0f4ff;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
     }
-    .ai-powered-by {
-        font-size: 0.7rem;
-        color: #2d3748;
+    .ai-model-pill {
+        font-size: 0.67rem;
         font-family: 'DM Mono', monospace;
-        letter-spacing: 0.06em;
+        letter-spacing: 0.08em;
+        color: #6366f1;
+        background: rgba(99,102,241,0.1);
+        border: 1px solid rgba(99,102,241,0.2);
+        padding: 0.18rem 0.55rem;
+        border-radius: 20px;
     }
+    /* Input row */
+    .ai-input-row {
+        border-top: 1px solid #1e2d45;
+        padding-top: 0.9rem;
+        margin-top: 0.5rem;
+    }
+    /* Hide default chat avatars — we style our own bubbles */
+    [data-testid="stChatMessageContent"] { padding: 0 !important; }
     </style>
     """, unsafe_allow_html=True)
 
-    # Session state defaults
-    if "ai_chat_open"    not in st.session_state: st.session_state["ai_chat_open"]    = False
-    if "ai_messages"     not in st.session_state: st.session_state["ai_messages"]     = []
-    if "ai_initial_done" not in st.session_state: st.session_state["ai_initial_done"] = False
-    if "ai_system_prompt" not in st.session_state: st.session_state["ai_system_prompt"] = ""
+    # ── Header ─────────────────────────────────────────────────────────────
+    band  = result.get("risk_band", "").upper()
+    score = result.get("risk_score", 0)
+    bc    = band_color(band.lower())
 
-    # ── Closed state: show CTA button ────────────────────────────────────────
-    if not st.session_state["ai_chat_open"]:
-        st.markdown("""
-        <div class="ask-ai-cta">
-          <div class="ask-ai-cta-label">Want to understand the reasoning behind this score?</div>
-        </div>
-        """, unsafe_allow_html=True)
-        col_l, col_c, col_r = st.columns([1.4, 2, 1.4])
-        with col_c:
-            if st.button("✦  Ask AI — Explain this Score", use_container_width=True, key="open_ai_chat"):
-                st.session_state["ai_chat_open"]    = True
-                st.session_state["ai_messages"]     = []
-                st.session_state["ai_initial_done"] = False
-                st.session_state["ai_system_prompt"] = _build_ai_system_prompt(result, metadata)
-                st.rerun()
-        return
-
-    # ── Open state: chat interface ────────────────────────────────────────────
-    client = _get_anthropic_client()
-
-    # Header row
-    st.markdown("""
-    <div class="ai-chat-heading">
-      <span class="ai-chat-title">🤖  AI Risk Analyst</span>
-      <span class="ai-powered-by">POWERED BY CLAUDE · ANTHROPIC</span>
+    st.markdown(f"""
+    <div class="ai-dialog-header">
+      <div class="ai-dialog-title">
+        🤖 AI Risk Analyst
+        <span style="font-size:0.78rem;font-weight:400;color:#4a5568;margin-left:0.3rem">
+          — {result.get('predicted_class','').upper()} RISK &nbsp;
+          <span style="color:{bc};font-weight:600">{score:.1f}/100</span>
+        </span>
+      </div>
+      <span class="ai-model-pill">claude-opus-4-6 · anthropic</span>
     </div>
     """, unsafe_allow_html=True)
 
-    col_spacer, col_close = st.columns([5, 1])
-    with col_close:
-        if st.button("✕ Close", key="close_ai_chat"):
-            st.session_state["ai_chat_open"]    = False
-            st.session_state["ai_messages"]     = []
-            st.session_state["ai_initial_done"] = False
-            st.rerun()
-
-    # No API key
+    # ── Client check ───────────────────────────────────────────────────────
+    client = _get_anthropic_client()
     if client is None:
-        st.warning(
-            "**Anthropic API key not found.** "
-            "Add `ANTHROPIC_API_KEY` to your Streamlit secrets (`.streamlit/secrets.toml`) "
-            "or set it as an environment variable.",
+        st.error(
+            "**API key not configured.** "
+            "Add `ANTHROPIC_API_KEY` in Streamlit Cloud → App Settings → Secrets.",
             icon="⚠️",
         )
         return
 
-    system_prompt = st.session_state["ai_system_prompt"] or _build_ai_system_prompt(result, metadata)
+    system_prompt = (
+        st.session_state.get("ai_system_prompt")
+        or _build_ai_system_prompt(result, metadata)
+    )
 
-    # Auto-generate the initial explanation on first open
-    if not st.session_state["ai_initial_done"]:
+    # ── Initial explanation (first open) ───────────────────────────────────
+    if not st.session_state.get("ai_initial_done"):
         init_prompt = (
-            f"Please explain why this ITGC finding was scored as "
-            f"**{result.get('risk_band', '').upper()} risk ({result.get('risk_score', 0):.1f}/100)**. "
-            "Walk through the key factors that drove the classification — referencing the SHAP feature "
-            "contributions and any cyber risk flags detected. Keep it concise and professional."
+            f"This ITGC finding was scored **{band} RISK ({score:.1f} / 100)** "
+            f"by an XGBoost classifier. Explain the rationale clearly and professionally.\n\n"
+            "Structure your response exactly as follows — use these exact section headings:\n\n"
+            "### Verdict\n"
+            "One bold sentence summarising the classification.\n\n"
+            "### Why this score?\n"
+            "2–3 sentences on the overall rationale.\n\n"
+            "### Key Drivers\n"
+            "Bullet list of the top SHAP features and what they mean in plain English.\n\n"
+            "### Risk Flags\n"
+            "List any detected risk flags and their significance (or note if none).\n\n"
+            "### Auditor Guidance\n"
+            "One sentence on whether to accept, escalate, or consider overriding the model score."
         )
+
+        st.markdown('<div class="ai-messages-wrap">', unsafe_allow_html=True)
         with st.chat_message("assistant", avatar="🤖"):
             response_text = st.write_stream(
-                _stream_ai_response(
-                    client,
-                    [{"role": "user", "content": init_prompt}],
-                    system_prompt,
-                )
+                _stream_ai_response(client, [{"role": "user", "content": init_prompt}], system_prompt)
             )
-        st.session_state["ai_messages"]     = [
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.session_state["ai_messages"] = [
             {"role": "user",      "content": init_prompt},
             {"role": "assistant", "content": response_text},
         ]
         st.session_state["ai_initial_done"] = True
 
     else:
-        # Display existing conversation — skip the hidden initial user prompt
-        for msg in st.session_state["ai_messages"][1:]:
-            avatar = "🤖" if msg["role"] == "assistant" else "👤"
-            with st.chat_message(msg["role"], avatar=avatar):
-                st.markdown(msg["content"])
+        # ── Existing conversation ──────────────────────────────────────────
+        st.markdown('<div class="ai-messages-wrap">', unsafe_allow_html=True)
+        for msg in st.session_state["ai_messages"][1:]:   # skip hidden init prompt
+            if msg["role"] == "assistant":
+                st.markdown(f'<div class="ai-bubble-assistant">{_md_to_html_passthrough(msg["content"])}</div>',
+                            unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="ai-bubble-user">{msg["content"]}</div>',
+                            unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    # Follow-up input
-    if user_input := st.chat_input("Ask a follow-up question…", key="ai_chat_input"):
-        with st.chat_message("user", avatar="👤"):
-            st.markdown(user_input)
-        st.session_state["ai_messages"].append({"role": "user", "content": user_input})
+    # ── Follow-up input ────────────────────────────────────────────────────
+    st.markdown('<div class="ai-input-row"></div>', unsafe_allow_html=True)
+    col_inp, col_btn = st.columns([6, 1])
+    with col_inp:
+        followup = st.text_input(
+            "followup",
+            placeholder="Ask a follow-up question…",
+            label_visibility="collapsed",
+            key="ai_followup_input",
+        )
+    with col_btn:
+        send = st.button("Send ↑", use_container_width=True, key="ai_send_btn")
 
+    if send and followup.strip():
+        st.session_state["ai_messages"].append({"role": "user", "content": followup.strip()})
         with st.chat_message("assistant", avatar="🤖"):
             response_text = st.write_stream(
-                _stream_ai_response(
-                    client,
-                    st.session_state["ai_messages"],
-                    system_prompt,
-                )
+                _stream_ai_response(client, st.session_state["ai_messages"], system_prompt)
             )
         st.session_state["ai_messages"].append({"role": "assistant", "content": response_text})
+        st.rerun()
+
+
+def _md_to_html_passthrough(text: str) -> str:
+    """Pass markdown through — Streamlit's unsafe_allow_html renders it as-is,
+    so we just escape nothing and rely on st.markdown for assistant bubbles
+    that use the chat_message widget. For custom div bubbles we return raw text."""
+    return text
+
+
+def _render_ask_ai(result: dict, metadata: dict):
+    """Render the Ask AI CTA and open the dialog on click."""
+    st.markdown("---")
+
+    # Session state defaults
+    for key, val in [("ai_chat_open", False), ("ai_messages", []),
+                     ("ai_initial_done", False), ("ai_system_prompt", "")]:
+        if key not in st.session_state:
+            st.session_state[key] = val
+
+    # CTA
+    st.markdown("""
+    <div style="text-align:center;padding:1.6rem 0 0.6rem">
+      <div style="font-size:0.75rem;color:#4a5568;letter-spacing:0.07em;
+                  text-transform:uppercase;margin-bottom:0.85rem">
+        Want to understand the reasoning behind this score?
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_l, col_c, col_r = st.columns([1.6, 2, 1.6])
+    with col_c:
+        if st.button("✦  Ask AI — Explain this Score", use_container_width=True, key="open_ai_chat"):
+            st.session_state["ai_chat_open"]     = True
+            st.session_state["ai_messages"]      = []
+            st.session_state["ai_initial_done"]  = False
+            st.session_state["ai_system_prompt"] = _build_ai_system_prompt(result, metadata)
+            _ai_dialog(result, metadata)
+
+    # Re-open dialog on page reruns while still active
+    if st.session_state.get("ai_chat_open") and st.session_state.get("ai_initial_done"):
+        _ai_dialog(result, metadata)
 
 
 def render():
