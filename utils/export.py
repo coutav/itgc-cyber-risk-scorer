@@ -5,8 +5,23 @@ Generates Aura-compatible JSON export and Excel batch output.
 
 import json
 import io
+import numpy as np
 from datetime import datetime
 import pandas as pd
+
+
+class _NumpyEncoder(json.JSONEncoder):
+    """Serialise numpy scalars and arrays to plain Python types."""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 
 def to_aura_json(result: dict, metadata: dict) -> str:
@@ -63,7 +78,7 @@ def to_aura_json(result: dict, metadata: dict) -> str:
                                  if metadata.get("auditor_override") else None,
         },
     }
-    return json.dumps(payload, indent=2)
+    return json.dumps(payload, indent=2, cls=_NumpyEncoder)
 
 
 def batch_to_excel(df: pd.DataFrame) -> bytes:
