@@ -616,6 +616,55 @@ def render():
         st.pyplot(gauge_fig, use_container_width=True)
         plt.close()
 
+        # ── PwC Scale conversion (1 = most critical, 5 = least) ──────────
+        pwc_levels = [
+            (1, "Critical",    "#e53e3e", (80, 100)),
+            (2, "High",        "#f97316", (60,  79)),
+            (3, "Moderate",    "#d97706", (40,  59)),
+            (4, "Low",         "#3b82f6", (20,  39)),
+            (5, "Negligible",  "#10b981", ( 0,  19)),
+        ]
+        pwc_rating = next(
+            (lvl for lvl, _, _, (lo, hi) in pwc_levels if lo <= score <= hi),
+            1
+        )
+        pwc_label  = next(lbl for lvl, lbl, _, _ in pwc_levels if lvl == pwc_rating)
+        pwc_colour = next(col for lvl, _, col, _ in pwc_levels if lvl == pwc_rating)
+
+        # Five-box strip
+        boxes = ""
+        for lvl, lbl, col, _ in pwc_levels:
+            active = lvl == pwc_rating
+            bg     = col if active else "#1a2236"
+            border = col if active else "#1e2d45"
+            weight = "700" if active else "400"
+            opacity = "1" if active else "0.35"
+            boxes += (
+                f'<div style="flex:1;text-align:center;padding:0.35rem 0.1rem;'
+                f'background:{bg};border:1px solid {border};border-radius:6px;'
+                f'opacity:{opacity};transition:all .2s">'
+                f'<div style="font-size:1rem;font-weight:{weight};color:#f0f4ff">{lvl}</div>'
+                f'<div style="font-size:0.55rem;color:#8898aa;letter-spacing:0.04em;'
+                f'margin-top:0.1rem">{lbl.upper()}</div>'
+                f'</div>'
+            )
+
+        st.markdown(f"""
+        <div style="margin-top:0.6rem">
+          <div style="font-size:0.68rem;color:#4a5568;letter-spacing:0.07em;
+                      text-transform:uppercase;margin-bottom:0.45rem;text-align:center">
+            PwC Rating Scale
+          </div>
+          <div style="display:flex;gap:0.3rem">{boxes}</div>
+          <div style="text-align:center;margin-top:0.5rem">
+            <span style="font-size:0.72rem;color:{pwc_colour};font-weight:600;
+                         font-family:'DM Mono',monospace;letter-spacing:0.05em">
+              RATING {pwc_rating} — {pwc_label.upper()}
+            </span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
     with col_p:
         st.markdown('<div class="section-header">Class Probabilities</div>', unsafe_allow_html=True)
         for cls, prob, col in [
