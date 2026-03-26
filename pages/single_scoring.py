@@ -3,6 +3,7 @@ pages/single_scoring.py
 Single-finding scorer with SHAP waterfall, gauge, flags, and human-in-the-loop override.
 """
 
+import os
 import streamlit as st
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -163,6 +164,257 @@ def render_shap_bar(features: list, values: list, band: str):
     return fig
 
 
+# ── Ask AI helpers ─────────────────────────────────────────────────────────────
+
+def _build_ai_system_prompt(result: dict, metadata: dict) -> str:
+    """Build a rich context-aware system prompt for the AI chat."""
+    shap_lines = []
+    for feat, val in zip(result.get("shap_features", [])[:10], result.get("shap_values", [])[:10]):
+        direction = "increases" if val > 0 else "decreases"
+        clean = (feat.replace("flag_", "")
+                     .replace("_", " ")
+                     .replace("tfidf ", "keyword: ")
+                     .replace("domain ", "domain: ")
+                     .replace("industry ", "industry: ")
+                     .replace("apptype ", "app type: ")
+                     .title())
+        shap_lines.append(f"  • {clean} ({direction} risk, SHAP={val:+.4f})")
+    shap_str = "\n".join(shap_lines) if shap_lines else "  Not available"
+
+    flags_active = [FLAG_LABELS[k] for k, v in result.get("flags", {}).items() if v]
+    flags_str    = ", ".join(flags_active) if flags_active else "None detected"
+    domain_full  = f"{metadata.get('control_domain')} — {DOMAIN_LABELS.get(metadata.get('control_domain', ''), '')}"
+
+    return f"""You are an expert ITGC (IT General Controls) cyber risk analyst embedded in a scoring tool used by auditors at a professional services firm.
+
+An XGBoost machine learning model has just scored an ITGC deficiency finding. Your role is to explain the score in clear, professional language and answer follow-up questions from the auditor.
+
+═══════════════════════════════════════════
+FINDING DETAILS
+═══════════════════════════════════════════
+Control Domain : {domain_full}
+Application    : {metadata.get('application', 'Unknown')}
+Industry       : {metadata.get('industry', 'Unknown')}
+App Type       : {metadata.get('app_type', 'Unknown')}
+
+OBSERVATION:
+{metadata.get('observation', '')}
+
+RISK STATEMENT:
+{metadata.get('risk', '')}
+
+═══════════════════════════════════════════
+MODEL SCORING RESULTS
+═══════════════════════════════════════════
+Risk Score      : {result.get('risk_score', 0):.1f} / 100
+Risk Band       : {result.get('risk_band', '').upper()}
+Predicted Class : {result.get('predicted_class', '').upper()}
+P(High)         : {result.get('p_high', 0)*100:.1f}%
+P(Medium)       : {result.get('p_medium', 0)*100:.1f}%
+P(Low)          : {result.get('p_low', 0)*100:.1f}%
+
+Observation length         : {result.get('obs_word_count', '—')} words
+High-severity keywords     : {result.get('high_sev_kw_count', '—')}
+Quantity finding detected  : {'Yes' if result.get('has_quantity_finding') else 'No'}
+Application tier           : {result.get('app_tier', '—')}
+
+CYBER RISK FLAGS DETECTED:
+{flags_str}
+
+TOP SHAP FEATURE CONTRIBUTIONS:
+{shap_str}
+
+═══════════════════════════════════════════
+YOUR GUIDELINES
+═══════════════════════════════════════════
+- Explain the score clearly and concisely in professional audit language
+- Reference specific SHAP drivers and flags to justify the classification
+- Keep responses focused — no unnecessary padding
+- Be transparent about model uncertainty where relevant
+- If asked about override decisions, provide balanced, objective guidance
+- Use markdown formatting (bold key terms, bullet points where helpful)
+"""
+
+
+def _get_anthropic_client():
+    """Get Anthropic client, checking Streamlit secrets then environment."""
+    api_key = None
+    try:
+        api_key = st.secrets.get("ANTHROPIC_API_KEY")
+    except Exception:
+        pass
+    if not api_key:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+    try:
+        import anthropic
+        return anthropic.Anthropic(api_key=api_key)
+    except ImportError:
+        return None
+
+
+def _stream_ai_response(client, messages: list, system_prompt: str):
+    """Yield text tokens from a streaming Claude response."""
+    import anthropic as _anthropic
+    with client.messages.stream(
+        model="claude-opus-4-6",
+        max_tokens=2048,
+        system=system_prompt,
+        messages=messages,
+    ) as stream:
+        for text in stream.text_stream:
+            yield text
+
+
+def _render_ask_ai(result: dict, metadata: dict):
+    """Render the Ask AI chat panel after scoring results."""
+    st.markdown("---")
+
+    # Inject chat-specific styles
+    st.markdown("""
+    <style>
+    .ask-ai-cta {
+        text-align: center;
+        padding: 1.8rem 0 0.5rem;
+    }
+    .ask-ai-cta-label {
+        font-size: 0.82rem;
+        color: #4a5568;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        margin-bottom: 0.9rem;
+    }
+    .ai-chat-container {
+        background: #080d18;
+        border: 1px solid #1e2d45;
+        border-radius: 16px;
+        padding: 1.5rem 1.8rem 0.5rem;
+        margin-top: 0.4rem;
+    }
+    .ai-chat-heading {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 1rem;
+        border-bottom: 1px solid #1a2236;
+        padding-bottom: 0.8rem;
+    }
+    .ai-chat-title {
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: #a5b4fc;
+        letter-spacing: 0.04em;
+    }
+    .ai-powered-by {
+        font-size: 0.7rem;
+        color: #2d3748;
+        font-family: 'DM Mono', monospace;
+        letter-spacing: 0.06em;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # Session state defaults
+    if "ai_chat_open"    not in st.session_state: st.session_state["ai_chat_open"]    = False
+    if "ai_messages"     not in st.session_state: st.session_state["ai_messages"]     = []
+    if "ai_initial_done" not in st.session_state: st.session_state["ai_initial_done"] = False
+    if "ai_system_prompt" not in st.session_state: st.session_state["ai_system_prompt"] = ""
+
+    # ── Closed state: show CTA button ────────────────────────────────────────
+    if not st.session_state["ai_chat_open"]:
+        st.markdown("""
+        <div class="ask-ai-cta">
+          <div class="ask-ai-cta-label">Want to understand the reasoning behind this score?</div>
+        </div>
+        """, unsafe_allow_html=True)
+        col_l, col_c, col_r = st.columns([1.4, 2, 1.4])
+        with col_c:
+            if st.button("✦  Ask AI — Explain this Score", use_container_width=True, key="open_ai_chat"):
+                st.session_state["ai_chat_open"]    = True
+                st.session_state["ai_messages"]     = []
+                st.session_state["ai_initial_done"] = False
+                st.session_state["ai_system_prompt"] = _build_ai_system_prompt(result, metadata)
+                st.rerun()
+        return
+
+    # ── Open state: chat interface ────────────────────────────────────────────
+    client = _get_anthropic_client()
+
+    # Header row
+    st.markdown("""
+    <div class="ai-chat-heading">
+      <span class="ai-chat-title">🤖  AI Risk Analyst</span>
+      <span class="ai-powered-by">POWERED BY CLAUDE · ANTHROPIC</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_spacer, col_close = st.columns([5, 1])
+    with col_close:
+        if st.button("✕ Close", key="close_ai_chat"):
+            st.session_state["ai_chat_open"]    = False
+            st.session_state["ai_messages"]     = []
+            st.session_state["ai_initial_done"] = False
+            st.rerun()
+
+    # No API key
+    if client is None:
+        st.warning(
+            "**Anthropic API key not found.** "
+            "Add `ANTHROPIC_API_KEY` to your Streamlit secrets (`.streamlit/secrets.toml`) "
+            "or set it as an environment variable.",
+            icon="⚠️",
+        )
+        return
+
+    system_prompt = st.session_state["ai_system_prompt"] or _build_ai_system_prompt(result, metadata)
+
+    # Auto-generate the initial explanation on first open
+    if not st.session_state["ai_initial_done"]:
+        init_prompt = (
+            f"Please explain why this ITGC finding was scored as "
+            f"**{result.get('risk_band', '').upper()} risk ({result.get('risk_score', 0):.1f}/100)**. "
+            "Walk through the key factors that drove the classification — referencing the SHAP feature "
+            "contributions and any cyber risk flags detected. Keep it concise and professional."
+        )
+        with st.chat_message("assistant", avatar="🤖"):
+            response_text = st.write_stream(
+                _stream_ai_response(
+                    client,
+                    [{"role": "user", "content": init_prompt}],
+                    system_prompt,
+                )
+            )
+        st.session_state["ai_messages"]     = [
+            {"role": "user",      "content": init_prompt},
+            {"role": "assistant", "content": response_text},
+        ]
+        st.session_state["ai_initial_done"] = True
+
+    else:
+        # Display existing conversation — skip the hidden initial user prompt
+        for msg in st.session_state["ai_messages"][1:]:
+            avatar = "🤖" if msg["role"] == "assistant" else "👤"
+            with st.chat_message(msg["role"], avatar=avatar):
+                st.markdown(msg["content"])
+
+    # Follow-up input
+    if user_input := st.chat_input("Ask a follow-up question…", key="ai_chat_input"):
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(user_input)
+        st.session_state["ai_messages"].append({"role": "user", "content": user_input})
+
+        with st.chat_message("assistant", avatar="🤖"):
+            response_text = st.write_stream(
+                _stream_ai_response(
+                    client,
+                    st.session_state["ai_messages"],
+                    system_prompt,
+                )
+            )
+        st.session_state["ai_messages"].append({"role": "assistant", "content": response_text})
+
+
 def render():
     st.markdown("## 🎯 Single Finding Scorer")
     st.markdown('<div class="section-header">Enter an ITGC deficiency finding to generate a cyber risk score with SHAP explainability</div>', unsafe_allow_html=True)
@@ -205,8 +457,6 @@ def render():
             help="Full risk text from the audit finding.",
             key="risk_area"
         )
-        ask_ai_btn = st.button("🤖 Ask AI", key="ask_ai_btn")
-
     with col_right:
         st.markdown('<div class="section-header">Finding Metadata</div>', unsafe_allow_html=True)
 
@@ -263,6 +513,10 @@ def render():
             "industry":       industry,
             "app_type":       app_type,
         }
+        # Reset AI chat whenever a new score is computed
+        st.session_state["ai_chat_open"]   = False
+        st.session_state["ai_messages"]    = []
+        st.session_state["ai_initial_done"] = False
 
     # ── Results panel ──────────────────────────────────────────────────────────
     if "last_result" not in st.session_state:
@@ -364,6 +618,9 @@ def render():
         st.warning(f"SHAP computation skipped: {result['shap_error']}")
     else:
         st.info("SHAP values not available for this result.")
+
+    # ── Ask AI ─────────────────────────────────────────────────────────────────
+    _render_ask_ai(result, metadata)
 
     # ── Human-in-the-loop override ────────────────────────────────────────────
     st.markdown("---")
